@@ -29,7 +29,7 @@ CHART_COLORS = ["#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9", "#f1fa8c"
 EXCHANGE_OPTIONS = ["binance", "aster", "okx", "bybit", "hyperliquid", "lighter", "extended"]
 MILLION_USD = 1_000_000
 PAGE_SIZE = 1000
-REFRESH_OPTIONS = {"15 秒": 15, "30 秒": 30, "60 秒": 60, "120 秒": 120, "300 秒": 300}
+DEFAULT_REFRESH_SECONDS = 300
 ZERO_DECIMAL = Decimal("0")
 
 
@@ -630,6 +630,10 @@ def render_missing_config() -> None:
     st.error("缺少后台数据读取配置。请在 Streamlit Secrets 中配置 SUPABASE_URL 和 SUPABASE_PUBLISHABLE_KEY。")
 
 
+def render_default_refresh_note() -> None:
+    st.caption(f"默认数据刷新频率：{DEFAULT_REFRESH_SECONDS} 秒")
+
+
 def main() -> None:
     st.set_page_config(page_title="美股资金费套利", page_icon=":material/query_stats:", layout="wide")
     inject_style()
@@ -639,21 +643,19 @@ def main() -> None:
         render_hero("美股资金费套利", "深色实时资金费仪表盘，融合 latest / next / rolling APR、OI 与 24h 成交量，快速发现跨交易所错位。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
-            col_exchange, col_type, col_refresh = st.columns([1.7, 1.25, 1.0])
+            col_exchange, col_type = st.columns([1.7, 1.25])
             with col_exchange:
                 exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"])
             with col_type:
                 asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部")
-            with col_refresh:
-                refresh_label = st.selectbox("刷新频率", options=list(REFRESH_OPTIONS), index=4, key="rwa_home_refresh_label")
-                refresh_seconds = REFRESH_OPTIONS[refresh_label]
+            render_default_refresh_note()
         if not exchanges:
             st.warning("请至少选择一个交易所。")
         elif load_config() is None:
             render_missing_config()
         else:
             try:
-                rows, loaded_at = get_cached_rows(exchanges, asset_type_filters, refresh_seconds)
+                rows, loaded_at = get_cached_rows(exchanges, asset_type_filters, DEFAULT_REFRESH_SECONDS)
                 render_dashboard_rows(rows, exchanges, loaded_at)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
@@ -662,21 +664,19 @@ def main() -> None:
         render_hero("APR spread lab", "按统一 Symbol 对齐同标的，分别比较多交易所 24h / 7d / 15d / 30d APR 差异。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
-            col_exchange, col_type, col_refresh = st.columns([1.7, 1.25, 1.0])
+            col_exchange, col_type = st.columns([1.7, 1.25])
             with col_exchange:
                 compare_exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"], key="rwa_compare_exchanges_picker")
             with col_type:
                 compare_asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部", key="rwa_compare_asset_types_picker")
-            with col_refresh:
-                compare_refresh_label = st.selectbox("刷新频率", options=list(REFRESH_OPTIONS), index=4, key="rwa_compare_refresh_label")
-                compare_refresh_seconds = REFRESH_OPTIONS[compare_refresh_label]
+            render_default_refresh_note()
         if len(compare_exchanges) < 2:
             st.warning("APR 比较至少需要选择两个交易所。")
         elif load_config() is None:
             render_missing_config()
         else:
             try:
-                compare_rows, _ = get_cached_rows(compare_exchanges, compare_asset_type_filters, compare_refresh_seconds)
+                compare_rows, _ = get_cached_rows(compare_exchanges, compare_asset_type_filters, DEFAULT_REFRESH_SECONDS)
                 render_apr_comparison(compare_rows)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
