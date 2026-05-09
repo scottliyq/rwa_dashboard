@@ -547,15 +547,18 @@ def render_funding_table(frame: pd.DataFrame) -> None:
         )
 
 
-def render_dashboard_rows(rows: list[DashboardFundingRow], exchanges: list[str], loaded_at: float) -> None:
+def render_dashboard_rows(
+    rows: list[DashboardFundingRow],
+    exchanges: list[str],
+    loaded_at: float,
+    selected_symbols: list[str],
+) -> None:
     loaded_at_iso = datetime.fromtimestamp(loaded_at, tz=timezone.utc).isoformat()
     st.markdown(f'<div class="rwa-status"><strong>数据状态</strong> 后台数据({len(rows):,}) &nbsp; | &nbsp; <strong>交易所</strong> {escape(",".join(exchanges))} &nbsp; | &nbsp; <strong>加载时间</strong> {escape(loaded_at_iso)} &nbsp; | &nbsp; <strong>Now UTC</strong> {datetime.now(timezone.utc).isoformat()}</div>', unsafe_allow_html=True)
     if not rows:
         st.warning("暂无可展示的数据。请确认后台任务已经写入数据。")
         return
 
-    symbol_options = sorted({row.canonical_symbol for row in rows if row.canonical_symbol})
-    selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, default=[], placeholder="全部", key="rwa_symbol_filter")
     frame = pd.DataFrame(as_table_rows(rows))
     if selected_symbols:
         frame = frame[frame["canonical_symbol"].isin(set(selected_symbols))]
@@ -612,12 +615,10 @@ def render_comparison_table(rows: list[AprComparisonRow], label: str) -> None:
         )
 
 
-def render_apr_comparison(rows: list[DashboardFundingRow]) -> None:
+def render_apr_comparison(rows: list[DashboardFundingRow], selected_symbols: list[str]) -> None:
     if not rows:
         st.warning("暂无可比较的数据。")
         return
-    symbol_options = sorted({row.canonical_symbol for row in rows if row.canonical_symbol})
-    selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, default=[], placeholder="全部", key="rwa_compare_symbol_filter")
     if selected_symbols:
         rows = [row for row in rows if row.canonical_symbol in set(selected_symbols)]
     tabs = st.tabs([label for label, _ in APR_COMPARISON_WINDOWS])
@@ -634,20 +635,32 @@ def render_default_refresh_note() -> None:
     st.caption(f"默认数据刷新频率：{DEFAULT_REFRESH_SECONDS} 秒")
 
 
+def sync_symbol_options(options_key: str, rows: list[DashboardFundingRow]) -> bool:
+    symbol_options = sorted({row.canonical_symbol for row in rows if row.canonical_symbol})
+    if st.session_state.get(options_key) == symbol_options:
+        return False
+    st.session_state[options_key] = symbol_options
+    return True
+
+
 def main() -> None:
     st.set_page_config(page_title="美股资金费套利", page_icon=":material/query_stats:", layout="wide")
     inject_style()
+    needs_symbol_options_refresh = False
     home_tab, compare_tab = st.tabs([":material/dashboard: 首页", ":material/compare_arrows: APR比较"])
 
     with home_tab:
         render_hero("美股资金费套利", "深色实时资金费仪表盘，融合 latest / next / rolling APR、OI 与 24h 成交量，快速发现跨交易所错位。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
-            col_exchange, col_type = st.columns([1.7, 1.25])
+            col_exchange, col_type, col_symbol = st.columns([1.35, 1.1, 1.45])
             with col_exchange:
                 exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"])
             with col_type:
                 asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部")
+            with col_symbol:
+                symbol_options = st.session_state.get("rwa_symbol_options", [])
+                selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, default=[], placeholder="全部", key="rwa_symbol_filter")
             render_default_refresh_note()
         if not exchanges:
             st.warning("请至少选择一个交易所。")
@@ -656,7 +669,8 @@ def main() -> None:
         else:
             try:
                 rows, loaded_at = get_cached_rows(exchanges, asset_type_filters, DEFAULT_REFRESH_SECONDS)
-                render_dashboard_rows(rows, exchanges, loaded_at)
+                needs_symbol_options_refresh = sync_symbol_options("rwa_symbol_options", rows) or needs_symbol_options_refresh
+                render_dashboard_rows(rows, exchanges, loaded_at, selected_symbols)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
 
@@ -664,11 +678,14 @@ def main() -> None:
         render_hero("APR spread lab", "按统一 Symbol 对齐同标的，分别比较多交易所 24h / 7d / 15d / 30d APR 差异。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
-            col_exchange, col_type = st.columns([1.7, 1.25])
+            col_exchange, col_type, col_symbol = st.columns([1.35, 1.1, 1.45])
             with col_exchange:
                 compare_exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"], key="rwa_compare_exchanges_picker")
             with col_type:
                 compare_asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部", key="rwa_compare_asset_types_picker")
+            with col_symbol:
+                compare_symbol_options = st.session_state.get("rwa_compare_symbol_options", [])
+                compare_selected_symbols = st.multiselect("Symbol（多选）", options=compare_symbol_options, default=[], placeholder="全部", key="rwa_compare_symbol_filter")
             render_default_refresh_note()
         if len(compare_exchanges) < 2:
             st.warning("APR 比较至少需要选择两个交易所。")
@@ -677,9 +694,13 @@ def main() -> None:
         else:
             try:
                 compare_rows, _ = get_cached_rows(compare_exchanges, compare_asset_type_filters, DEFAULT_REFRESH_SECONDS)
-                render_apr_comparison(compare_rows)
+                needs_symbol_options_refresh = sync_symbol_options("rwa_compare_symbol_options", compare_rows) or needs_symbol_options_refresh
+                render_apr_comparison(compare_rows, compare_selected_symbols)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
+
+    if needs_symbol_options_refresh:
+        st.rerun()
 
 
 if __name__ == "__main__":
