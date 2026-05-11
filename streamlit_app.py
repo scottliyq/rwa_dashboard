@@ -47,6 +47,7 @@ HOME_SYMBOLS_KEY = "rwa_symbol_filter"
 COMPARE_EXCHANGES_KEY = "rwa_compare_exchanges_picker"
 COMPARE_ASSET_TYPES_KEY = "rwa_compare_asset_types_picker"
 COMPARE_SYMBOLS_KEY = "rwa_compare_symbol_filter"
+EMPTY_QUERY_SELECTION = "__empty__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -665,8 +666,11 @@ def query_param_values(param_key: str) -> list[str]:
 def query_param_selection(param_key: str, options: list[str], default: list[str]) -> list[str]:
     if param_key not in st.query_params:
         return list(default)
+    raw_values = query_param_values(param_key)
+    if EMPTY_QUERY_SELECTION in raw_values:
+        return []
     option_set = set(options)
-    return [value for value in query_param_values(param_key) if value in option_set]
+    return [value for value in raw_values if value in option_set]
 
 
 def prepare_multiselect_state(
@@ -676,23 +680,41 @@ def prepare_multiselect_state(
     default: list[str] | None = None,
 ) -> None:
     default_values = default or []
+    raw_query_values = query_param_values(param_key)
     query_values = query_param_selection(param_key, options, default_values)
-    current_values = st.session_state.get(widget_key)
-    if widget_key not in st.session_state or (not current_values and query_values):
+    pending_query_key = f"{widget_key}_pending_query_values"
+    if widget_key not in st.session_state:
         st.session_state[widget_key] = query_values
+        if raw_query_values and not query_values and not options:
+            st.session_state[pending_query_key] = raw_query_values
+        else:
+            st.session_state.pop(pending_query_key, None)
         return
+    pending_query_values = st.session_state.get(pending_query_key, [])
+    if pending_query_values and not st.session_state.get(widget_key):
+        option_set = set(options)
+        restored_values = [value for value in pending_query_values if value in option_set]
+        if restored_values:
+            st.session_state[widget_key] = restored_values
+            st.session_state.pop(pending_query_key, None)
+            return
+        if options:
+            st.session_state.pop(pending_query_key, None)
     option_set = set(options)
+    current_values = st.session_state.get(widget_key, [])
     st.session_state[widget_key] = [value for value in current_values if value in option_set]
 
 
 def set_query_param_selection(param_key: str, values: list[str] | None) -> None:
     if values is None:
         return
-    next_values: str | list[str] = values if values else ""
-    current_values: str | list[str] = query_param_values(param_key)
-    if current_values == values or (not current_values and not values and param_key in st.query_params):
+    current_values = query_param_values(param_key)
+    if current_values == values or (not values and current_values == [EMPTY_QUERY_SELECTION]):
         return
-    st.query_params[param_key] = next_values
+    if not values:
+        st.query_params[param_key] = EMPTY_QUERY_SELECTION
+        return
+    st.query_params[param_key] = values
 
 
 def sync_symbol_options(options_key: str, rows: list[DashboardFundingRow]) -> bool:
