@@ -12,6 +12,14 @@ import plotly.express as px
 import requests
 import streamlit as st
 
+try:
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
+if load_dotenv is not None:
+    load_dotenv()
+
 
 ASSET_TYPE_ALL = "全部"
 ASSET_TYPE_COMMODITY = "商品"
@@ -31,6 +39,14 @@ MILLION_USD = 1_000_000
 PAGE_SIZE = 1000
 DEFAULT_REFRESH_SECONDS = 300
 ZERO_DECIMAL = Decimal("0")
+DEFAULT_EXCHANGES = ["okx", "binance"]
+DEFAULT_ASSET_TYPE_FILTERS = [ASSET_TYPE_STOCK]
+HOME_EXCHANGES_KEY = "rwa_home_exchanges"
+HOME_ASSET_TYPES_KEY = "rwa_home_asset_types"
+HOME_SYMBOLS_KEY = "rwa_symbol_filter"
+COMPARE_EXCHANGES_KEY = "rwa_compare_exchanges_picker"
+COMPARE_ASSET_TYPES_KEY = "rwa_compare_asset_types_picker"
+COMPARE_SYMBOLS_KEY = "rwa_compare_symbol_filter"
 
 
 @dataclass(frozen=True, slots=True)
@@ -635,6 +651,50 @@ def render_default_refresh_note() -> None:
     st.caption(f"默认数据刷新频率：{DEFAULT_REFRESH_SECONDS} 秒")
 
 
+def query_param_values(param_key: str) -> list[str]:
+    if param_key not in st.query_params:
+        return []
+    if hasattr(st.query_params, "get_all"):
+        values = st.query_params.get_all(param_key)
+    else:
+        value = st.query_params.get(param_key, [])
+        values = value if isinstance(value, list) else [value]
+    return [str(value) for value in values if str(value)]
+
+
+def query_param_selection(param_key: str, options: list[str], default: list[str]) -> list[str]:
+    if param_key not in st.query_params:
+        return list(default)
+    option_set = set(options)
+    return [value for value in query_param_values(param_key) if value in option_set]
+
+
+def prepare_multiselect_state(
+    widget_key: str,
+    param_key: str,
+    options: list[str],
+    default: list[str] | None = None,
+) -> None:
+    default_values = default or []
+    query_values = query_param_selection(param_key, options, default_values)
+    current_values = st.session_state.get(widget_key)
+    if widget_key not in st.session_state or (not current_values and query_values):
+        st.session_state[widget_key] = query_values
+        return
+    option_set = set(options)
+    st.session_state[widget_key] = [value for value in current_values if value in option_set]
+
+
+def set_query_param_selection(param_key: str, values: list[str] | None) -> None:
+    if values is None:
+        return
+    next_values: str | list[str] = values if values else ""
+    current_values: str | list[str] = query_param_values(param_key)
+    if current_values == values or (not current_values and not values and param_key in st.query_params):
+        return
+    st.query_params[param_key] = next_values
+
+
 def sync_symbol_options(options_key: str, rows: list[DashboardFundingRow]) -> bool:
     symbol_options = sorted({row.canonical_symbol for row in rows if row.canonical_symbol})
     if st.session_state.get(options_key) == symbol_options:
@@ -655,12 +715,15 @@ def main() -> None:
             st.markdown("#### :material/tune: Controls")
             col_exchange, col_type, col_symbol = st.columns([1.35, 1.1, 1.45])
             with col_exchange:
-                exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"])
+                prepare_multiselect_state(HOME_EXCHANGES_KEY, "exchanges", EXCHANGE_OPTIONS, DEFAULT_EXCHANGES)
+                exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, key=HOME_EXCHANGES_KEY)
             with col_type:
-                asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部")
+                prepare_multiselect_state(HOME_ASSET_TYPES_KEY, "asset_types", ASSET_TYPE_OPTIONS, DEFAULT_ASSET_TYPE_FILTERS)
+                asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, placeholder="全部", key=HOME_ASSET_TYPES_KEY)
             with col_symbol:
                 symbol_options = st.session_state.get("rwa_symbol_options", [])
-                selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, default=[], placeholder="全部", key="rwa_symbol_filter")
+                prepare_multiselect_state(HOME_SYMBOLS_KEY, "symbols", symbol_options)
+                selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, placeholder="全部", key=HOME_SYMBOLS_KEY)
             render_default_refresh_note()
         if not exchanges:
             st.warning("请至少选择一个交易所。")
@@ -680,12 +743,15 @@ def main() -> None:
             st.markdown("#### :material/tune: Controls")
             col_exchange, col_type, col_symbol = st.columns([1.35, 1.1, 1.45])
             with col_exchange:
-                compare_exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, default=["okx", "binance"], key="rwa_compare_exchanges_picker")
+                prepare_multiselect_state(COMPARE_EXCHANGES_KEY, "compare_exchanges", EXCHANGE_OPTIONS, DEFAULT_EXCHANGES)
+                compare_exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, key=COMPARE_EXCHANGES_KEY)
             with col_type:
-                compare_asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, default=[ASSET_TYPE_STOCK], placeholder="全部", key="rwa_compare_asset_types_picker")
+                prepare_multiselect_state(COMPARE_ASSET_TYPES_KEY, "compare_asset_types", ASSET_TYPE_OPTIONS, DEFAULT_ASSET_TYPE_FILTERS)
+                compare_asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, placeholder="全部", key=COMPARE_ASSET_TYPES_KEY)
             with col_symbol:
                 compare_symbol_options = st.session_state.get("rwa_compare_symbol_options", [])
-                compare_selected_symbols = st.multiselect("Symbol（多选）", options=compare_symbol_options, default=[], placeholder="全部", key="rwa_compare_symbol_filter")
+                prepare_multiselect_state(COMPARE_SYMBOLS_KEY, "compare_symbols", compare_symbol_options)
+                compare_selected_symbols = st.multiselect("Symbol（多选）", options=compare_symbol_options, placeholder="全部", key=COMPARE_SYMBOLS_KEY)
             render_default_refresh_note()
         if len(compare_exchanges) < 2:
             st.warning("APR 比较至少需要选择两个交易所。")
@@ -701,6 +767,12 @@ def main() -> None:
 
     if needs_symbol_options_refresh:
         st.rerun()
+    set_query_param_selection("exchanges", exchanges)
+    set_query_param_selection("asset_types", asset_type_filters)
+    set_query_param_selection("symbols", selected_symbols if symbol_options else None)
+    set_query_param_selection("compare_exchanges", compare_exchanges)
+    set_query_param_selection("compare_asset_types", compare_asset_type_filters)
+    set_query_param_selection("compare_symbols", compare_selected_symbols if compare_symbol_options else None)
 
 
 if __name__ == "__main__":
