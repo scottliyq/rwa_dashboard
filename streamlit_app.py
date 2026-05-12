@@ -34,7 +34,7 @@ APR_COMPARISON_WINDOWS = (
 )
 APR_COMPARISON_FIELDS = {field for _, field in APR_COMPARISON_WINDOWS}
 CHART_COLORS = ["#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9", "#f1fa8c"]
-EXCHANGE_OPTIONS = ["binance", "aster", "okx", "bybit", "hyperliquid", "lighter", "extended"]
+EXCHANGE_OPTIONS = ["binance", "aster", "bitget", "okx", "bybit", "hyperliquid", "lighter", "extended"]
 MILLION_USD = 1_000_000
 PAGE_SIZE = 1000
 DEFAULT_REFRESH_SECONDS = 300
