@@ -539,8 +539,21 @@ def render_breadth_chips(frame: pd.DataFrame) -> None:
 def render_funding_table(frame: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("#### :material/table_chart: Funding surface")
+        oi_min_col, oi_max_col, _ = st.columns([1, 1, 2.5])
+        with oi_min_col:
+            min_oi = st.number_input("最小 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_min_oi")
+        with oi_max_col:
+            max_oi = st.number_input("最大 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_max_oi")
+        if min_oi is not None and max_oi is not None and min_oi > max_oi:
+            st.warning("最小 OI 不能大于最大 OI。")
+            return
+        table_frame = frame
+        if min_oi is not None:
+            table_frame = table_frame[table_frame["open_interest_musd"] >= min_oi]
+        if max_oi is not None:
+            table_frame = table_frame[table_frame["open_interest_musd"] <= max_oi]
         st.dataframe(
-            frame,
+            table_frame,
             width="stretch",
             hide_index=True,
             column_order=["exchange", "symbol", "canonical_symbol", "asset_type", "open_interest_musd", "volume_24h_musd", "latest_apr", "next_apr", "apr_24h", "apr_7d", "apr_15d", "apr_30d", "funding_points", "next_funding_time_utc", "last_time_utc"],
