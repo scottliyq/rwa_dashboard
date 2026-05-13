@@ -498,15 +498,19 @@ def build_exchange_oi_share_chart(frame: pd.DataFrame):
 def build_symbol_volume_chart(frame: pd.DataFrame):
     grouped = frame.groupby("canonical_symbol", as_index=False).agg(volume_24h_musd=("volume_24h_musd", "sum"), exchange_count=("exchange", "nunique"), asset_type=("asset_type", "first")).nlargest(16, "volume_24h_musd").sort_values("volume_24h_musd", ascending=True)
     fig = px.bar(grouped, x="volume_24h_musd", y="canonical_symbol", orientation="h", color="volume_24h_musd", hover_data={"asset_type": True, "exchange_count": True, "volume_24h_musd": ":.2f"}, color_continuous_scale=["#50fa7b", "#8be9fd", "#bd93f9", "#ff79c6"], title="24h volume by symbol")
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", title_font_color="#f8f8f2", font_color="#d7defa", showlegend=False, coloraxis_showscale=False, margin=dict(l=8, r=8, t=48, b=8), height=320, xaxis_title="24h volume (M USD)", yaxis_title="")
+    symbols = grouped["canonical_symbol"].tolist()
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", title_font_color="#f8f8f2", font_color="#d7defa", showlegend=False, coloraxis_showscale=False, margin=dict(l=8, r=8, t=48, b=8), height=max(320, 42 * len(symbols)), xaxis_title="24h volume (M USD)", yaxis_title="")
+    fig.update_yaxes(tickmode="array", tickvals=symbols, ticktext=symbols)
     return fig
 
 
 def build_comparison_chart(rows: list[AprComparisonRow], label: str):
     frame = pd.DataFrame(as_comparison_table_rows(rows)).head(16)
     fig = px.bar(frame, x="apr_diff", y="canonical_symbol", orientation="h", color="apr_diff", color_continuous_scale=["#50fa7b", "#8be9fd", "#bd93f9", "#ff79c6"], hover_data={"max_exchange": True, "min_exchange": True, "max_apr": ":.2f", "min_apr": ":.2f", "apr_diff": ":.2f"}, title=f"{label} spread leaders")
-    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", title_font_color="#f8f8f2", font_color="#d7defa", coloraxis_showscale=False, margin=dict(l=8, r=8, t=48, b=8), height=360, xaxis_title="APR spread (%)", yaxis_title="", yaxis=dict(autorange="reversed"))
+    symbols = frame["canonical_symbol"].tolist()
+    fig.update_layout(template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", title_font_color="#f8f8f2", font_color="#d7defa", coloraxis_showscale=False, margin=dict(l=8, r=8, t=48, b=8), height=max(360, 42 * len(symbols)), xaxis_title="APR spread (%)", yaxis_title="", yaxis=dict(autorange="reversed"))
     fig.update_xaxes(tickformat=".2f")
+    fig.update_yaxes(tickmode="array", tickvals=symbols, ticktext=symbols)
     return fig
 
 
