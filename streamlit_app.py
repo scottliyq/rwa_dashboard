@@ -543,15 +543,22 @@ def render_breadth_chips(frame: pd.DataFrame) -> None:
 def render_funding_table(frame: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("#### :material/table_chart: Funding surface")
-        oi_min_col, oi_max_col, _ = st.columns([1, 1, 2.5])
+        oi_min_col, oi_max_col, symbol_col = st.columns([1, 1, 2.5])
         with oi_min_col:
             min_oi = st.number_input("最小 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_min_oi")
         with oi_max_col:
             max_oi = st.number_input("最大 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_max_oi")
+        with symbol_col:
+            symbol_options = sorted(frame["canonical_symbol"].dropna().unique().tolist())
+            prepare_multiselect_state(HOME_SYMBOLS_KEY, "symbols", symbol_options)
+            selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, placeholder="全部", key=HOME_SYMBOLS_KEY)
+        set_query_param_selection("symbols", selected_symbols)
         if min_oi is not None and max_oi is not None and min_oi > max_oi:
             st.warning("最小 OI 不能大于最大 OI。")
             return
         table_frame = frame
+        if selected_symbols:
+            table_frame = table_frame[table_frame["canonical_symbol"].isin(set(selected_symbols))]
         if min_oi is not None:
             table_frame = table_frame[table_frame["open_interest_musd"] >= min_oi]
         if max_oi is not None:
@@ -585,7 +592,6 @@ def render_dashboard_rows(
     rows: list[DashboardFundingRow],
     exchanges: list[str],
     loaded_at: float,
-    selected_symbols: list[str],
 ) -> None:
     loaded_at_iso = datetime.fromtimestamp(loaded_at, tz=timezone.utc).isoformat()
     st.markdown(f'<div class="rwa-status"><strong>数据状态</strong> 后台数据({len(rows):,}) &nbsp; | &nbsp; <strong>交易所</strong> {escape(",".join(exchanges))} &nbsp; | &nbsp; <strong>加载时间</strong> {escape(loaded_at_iso)} &nbsp; | &nbsp; <strong>Now UTC</strong> {datetime.now(timezone.utc).isoformat()}</div>', unsafe_allow_html=True)
@@ -594,11 +600,6 @@ def render_dashboard_rows(
         return
 
     frame = pd.DataFrame(as_table_rows(rows))
-    if selected_symbols:
-        frame = frame[frame["canonical_symbol"].isin(set(selected_symbols))]
-        if frame.empty:
-            st.warning("当前 Symbol 筛选下没有可展示的数据。")
-            return
     frame = frame.sort_values(by=["sort_apr", "exchange", "symbol"], ascending=[False, True, True]).reset_index(drop=True)
     render_kpis(frame)
     render_breadth_chips(frame)
@@ -752,17 +753,13 @@ def main() -> None:
         render_hero("美股资金费套利", "深色实时资金费仪表盘，融合 latest / next / rolling APR、OI 与 24h 成交量，快速发现跨交易所错位。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
-            col_exchange, col_type, col_symbol = st.columns([1.35, 1.1, 1.45])
+            col_exchange, col_type = st.columns([1.35, 1.1])
             with col_exchange:
                 prepare_multiselect_state(HOME_EXCHANGES_KEY, "exchanges", EXCHANGE_OPTIONS, DEFAULT_EXCHANGES)
                 exchanges = st.multiselect("交易所", options=EXCHANGE_OPTIONS, key=HOME_EXCHANGES_KEY)
             with col_type:
                 prepare_multiselect_state(HOME_ASSET_TYPES_KEY, "asset_types", ASSET_TYPE_OPTIONS, DEFAULT_ASSET_TYPE_FILTERS)
                 asset_type_filters = st.multiselect("类型（多选）", options=ASSET_TYPE_OPTIONS, placeholder="全部", key=HOME_ASSET_TYPES_KEY)
-            with col_symbol:
-                symbol_options = st.session_state.get("rwa_symbol_options", [])
-                prepare_multiselect_state(HOME_SYMBOLS_KEY, "symbols", symbol_options)
-                selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, placeholder="全部", key=HOME_SYMBOLS_KEY)
             render_default_refresh_note()
         if not exchanges:
             st.warning("请至少选择一个交易所。")
@@ -771,8 +768,7 @@ def main() -> None:
         else:
             try:
                 rows, loaded_at = get_cached_rows(exchanges, asset_type_filters, DEFAULT_REFRESH_SECONDS)
-                needs_symbol_options_refresh = sync_symbol_options("rwa_symbol_options", rows) or needs_symbol_options_refresh
-                render_dashboard_rows(rows, exchanges, loaded_at, selected_symbols)
+                render_dashboard_rows(rows, exchanges, loaded_at)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
 
@@ -808,7 +804,6 @@ def main() -> None:
         st.rerun()
     set_query_param_selection("exchanges", exchanges)
     set_query_param_selection("asset_types", asset_type_filters)
-    set_query_param_selection("symbols", selected_symbols if symbol_options else None)
     set_query_param_selection("compare_exchanges", compare_exchanges)
     set_query_param_selection("compare_asset_types", compare_asset_type_filters)
     set_query_param_selection("compare_symbols", compare_selected_symbols if compare_symbol_options else None)
