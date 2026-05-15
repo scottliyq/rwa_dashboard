@@ -543,7 +543,7 @@ def render_breadth_chips(frame: pd.DataFrame) -> None:
 def render_funding_table(frame: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("#### :material/table_chart: Funding surface")
-        oi_min_col, oi_max_col, symbol_col = st.columns([1, 1, 2.5])
+        oi_min_col, oi_max_col, symbol_col, _ = st.columns([0.75, 0.75, 1.2, 3.3])
         with oi_min_col:
             min_oi = st.number_input("最小 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_min_oi")
         with oi_max_col:
