@@ -34,7 +34,7 @@ APR_COMPARISON_WINDOWS = (
 )
 APR_COMPARISON_FIELDS = {field for _, field in APR_COMPARISON_WINDOWS}
 CHART_COLORS = ["#8be9fd", "#50fa7b", "#ffb86c", "#ff79c6", "#bd93f9", "#f1fa8c"]
-EXCHANGE_OPTIONS = ["binance", "aster", "bitget", "coinbase", "okx", "bybit", "hyperliquid", "lighter", "extended"]
+EXCHANGE_OPTIONS = ["binance", "aster", "bitget", "coinbase", "okx", "bybit", "hyperliquid", "lighter", "extended", "variational"]
 MILLION_USD = 1_000_000
 PAGE_SIZE = 1000
 DEFAULT_REFRESH_SECONDS = 300
@@ -331,12 +331,27 @@ def inject_style() -> None:
             --rwa-orange: #ffb86c;
             --rwa-purple: #bd93f9;
             --rwa-text-soft: #aeb7d6;
+            --rwa-font-cjk: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+                "Microsoft YaHei", "Noto Sans CJK SC", "Hiragino Sans GB", Arial, sans-serif;
         }
         .stApp {
+            font-family: var(--rwa-font-cjk);
             background:
                 radial-gradient(circle at 12% 0%, rgba(139, 233, 253, 0.14), transparent 32rem),
                 radial-gradient(circle at 86% 4%, rgba(189, 147, 249, 0.16), transparent 30rem),
                 linear-gradient(135deg, #0f111a 0%, #171923 48%, #10121a 100%);
+        }
+        .stApp :where(
+            [data-testid="stMarkdownContainer"],
+            [data-testid="stWidgetLabel"],
+            [data-testid="stMetric"],
+            [data-testid="stDataFrame"],
+            [data-baseweb="select"],
+            label,
+            button,
+            input
+        ) {
+            font-family: var(--rwa-font-cjk) !important;
         }
         .block-container { padding-top: 1.4rem; padding-bottom: 3rem; }
         header[data-testid="stHeader"], div[data-testid="stToolbar"], div[data-testid="stDecoration"],
