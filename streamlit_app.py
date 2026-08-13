@@ -44,6 +44,7 @@ DEFAULT_ASSET_TYPE_FILTERS = [ASSET_TYPE_STOCK]
 HOME_EXCHANGES_KEY = "rwa_home_exchanges"
 HOME_ASSET_TYPES_KEY = "rwa_home_asset_types"
 HOME_SYMBOLS_KEY = "rwa_symbol_filter"
+HOME_HAS_STOCK_SPOT_KEY = "rwa_home_has_stock_spot"
 COMPARE_EXCHANGES_KEY = "rwa_compare_exchanges_picker"
 COMPARE_ASSET_TYPES_KEY = "rwa_compare_asset_types_picker"
 COMPARE_SYMBOLS_KEY = "rwa_compare_symbol_filter"
@@ -56,6 +57,7 @@ class DashboardFundingRow:
     instrument: str
     canonical_symbol: str
     asset_type: str
+    has_stock_spot: bool
     latest_apr_percent: Decimal
     next_funding_rate: Decimal | None
     next_funding_apr_percent: Decimal | None
@@ -150,12 +152,21 @@ def to_optional_decimal(value: Any) -> Decimal | None:
     return to_decimal(value)
 
 
+def to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "1", "yes", "y", "t"}
+    return bool(value)
+
+
 def row_from_payload(row: dict[str, Any]) -> DashboardFundingRow:
     return DashboardFundingRow(
         exchange=str(row.get("exchange", "")),
         instrument=str(row.get("instrument", "")),
         canonical_symbol=str(row.get("canonical_symbol", "")),
         asset_type=str(row.get("asset_type", "")),
+        has_stock_spot=to_bool(row.get("has_stock_spot", False)),
         latest_apr_percent=to_decimal(row.get("latest_apr_percent")),
         next_funding_rate=to_optional_decimal(row.get("next_funding_rate")),
         next_funding_apr_percent=to_optional_decimal(row.get("next_funding_apr_percent")),
@@ -420,6 +431,7 @@ def as_table_rows(rows: list[DashboardFundingRow]) -> list[dict[str, object]]:
             "symbol": row.instrument,
             "canonical_symbol": row.canonical_symbol,
             "asset_type": row.asset_type,
+            "has_stock_spot": row.has_stock_spot,
             "latest_apr": float(row.latest_apr_percent),
             "next_apr": float(row.next_funding_apr_percent) if row.next_funding_apr_percent is not None else None,
             "open_interest_musd": float(row.open_interest_usd) / MILLION_USD,
@@ -558,7 +570,7 @@ def render_breadth_chips(frame: pd.DataFrame) -> None:
 def render_funding_table(frame: pd.DataFrame) -> None:
     with st.container(border=True):
         st.markdown("#### :material/table_chart: Funding surface")
-        oi_min_col, oi_max_col, symbol_col, _ = st.columns([0.75, 0.75, 1.2, 3.3])
+        oi_min_col, oi_max_col, symbol_col, stock_spot_col, _ = st.columns([0.75, 0.75, 1.2, 0.65, 2.65])
         with oi_min_col:
             min_oi = st.number_input("最小 OI (M USD)", min_value=0.0, value=None, placeholder="不限制", key="rwa_table_min_oi")
         with oi_max_col:
@@ -567,6 +579,8 @@ def render_funding_table(frame: pd.DataFrame) -> None:
             symbol_options = sorted(frame["canonical_symbol"].dropna().unique().tolist())
             prepare_multiselect_state(HOME_SYMBOLS_KEY, "symbols", symbol_options)
             selected_symbols = st.multiselect("Symbol（多选）", options=symbol_options, placeholder="全部", key=HOME_SYMBOLS_KEY)
+        with stock_spot_col:
+            has_stock_spot = st.checkbox("币股", value=False, key=HOME_HAS_STOCK_SPOT_KEY, help="仅显示 Supabase 中 has_stock_spot=true 的数据")
         set_query_param_selection("symbols", selected_symbols)
         if min_oi is not None and max_oi is not None and min_oi > max_oi:
             st.warning("最小 OI 不能大于最大 OI。")
@@ -574,6 +588,8 @@ def render_funding_table(frame: pd.DataFrame) -> None:
         table_frame = frame
         if selected_symbols:
             table_frame = table_frame[table_frame["canonical_symbol"].isin(set(selected_symbols))]
+        if has_stock_spot:
+            table_frame = table_frame[table_frame["has_stock_spot"]]
         if min_oi is not None:
             table_frame = table_frame[table_frame["open_interest_musd"] >= min_oi]
         if max_oi is not None:
