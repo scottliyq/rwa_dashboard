@@ -49,6 +49,31 @@ COMPARE_EXCHANGES_KEY = "rwa_compare_exchanges_picker"
 COMPARE_ASSET_TYPES_KEY = "rwa_compare_asset_types_picker"
 COMPARE_SYMBOLS_KEY = "rwa_compare_symbol_filter"
 EMPTY_QUERY_SELECTION = "__empty__"
+TOP_TAB_STATE_KEY = "rwa_top_tab"
+TOP_TAB_OPTIONS = {
+    "home": ":material/dashboard: 首页",
+    "compare": ":material/compare_arrows: APR比较",
+    "rh_pools": ":material/water_drop: RH Pools",
+}
+RH_TABLE_NAMES = (
+    "rh_pool_hourly_metrics",
+    "rh_pool_window_rankings",
+    "rh_rwa_assets",
+    "rh_sync_checkpoints",
+)
+RH_DASHBOARD_VIEW = "rh_pool_dashboard"
+RH_RANKINGS_TABLE = "rh_pool_window_rankings"
+RH_PUBLIC_TABLE_NAMES = (RH_DASHBOARD_VIEW, RH_RANKINGS_TABLE)
+RH_TOKEN_UNIVERSE_KEY = "__rh_token_universe__"
+RH_WINDOW_OPTIONS = ("2h", "4h", "24h")
+RH_WINDOW_LABELS = {"2h": "最近 2 小时", "4h": "最近 4 小时", "24h": "最近 24 小时"}
+RH_CHAIN_ID = "4663"
+RH_WINDOW_KEY = "rh_pool_window"
+RH_WINDOW_QUERY_KEY = "rh_window"
+RH_TOKEN_KEY = "rh_pool_tokens"
+RH_ADDRESS_KEY = "rh_pool_addresses"
+RH_NEW_ISSUE_KEY = "rh_pool_new_issue"
+RH_TABLE_ERRORS_KEY = "__errors__"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +109,29 @@ class AprComparisonRow:
     min_apr_percent: Decimal
     apr_diff_percent: Decimal
     exchange_aprs: str
+
+
+@dataclass(frozen=True, slots=True)
+class RhPoolRow:
+    pool_address: str
+    token: str
+    token_name: str
+    pool_name: str
+    tvl_usd: Decimal | None
+    volume_24h_usd: Decimal | None
+    is_new_issue: bool
+    fee_income_2h_usd: Decimal | None
+    fee_income_4h_usd: Decimal | None
+    fee_income_24h_usd: Decimal | None
+    fee_apr_percent: Decimal | None
+    window_2h_percent: Decimal | None
+    window_4h_percent: Decimal | None
+    window_24h_percent: Decimal | None
+    rank_2h: int | None
+    rank_4h: int | None
+    rank_24h: int | None
+    last_metric_time_iso: str
+    synced_at_iso: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,6 +206,44 @@ def to_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"true", "1", "yes", "y", "t"}
     return bool(value)
+
+
+def first_value(row: dict[str, Any], *keys: str) -> Any:
+    lowered = {str(key).lower(): value for key, value in row.items()}
+    for key in keys:
+        value = row.get(key, lowered.get(key.lower()))
+        if value not in (None, ""):
+            return value
+    return None
+
+
+def text_value(row: dict[str, Any], *keys: str, default: str = "") -> str:
+    value = first_value(row, *keys)
+    if value in (None, ""):
+        return default
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(item).strip() for item in value if str(item).strip())
+    return str(value).strip()
+
+
+def normalize_window(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip().lower().replace("hours", "h").replace("hour", "h")
+    digits = "".join(character for character in text if character.isdigit())
+    return f"{digits}h" if digits in {"2", "4", "24"} else None
+
+
+def parse_timestamp(value: Any) -> pd.Timestamp | None:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        unit = "ms" if numeric > 10_000_000_000 else "s"
+        parsed = pd.to_datetime(numeric, unit=unit, utc=True, errors="coerce")
+    else:
+        parsed = pd.to_datetime(value, utc=True, errors="coerce")
+    return None if pd.isna(parsed) else parsed
 
 
 def row_from_payload(row: dict[str, Any]) -> DashboardFundingRow:
@@ -258,6 +344,405 @@ def get_cached_rows(
         "loaded_at": loaded_at,
     }
     return rows, loaded_at
+
+
+def fetch_table_rows(
+    config: DataConfig,
+    table_name: str,
+    filters: dict[str, str] | None = None,
+    select: str = "*",
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        params = {"select": select, "limit": str(PAGE_SIZE), "offset": str(offset)}
+        params.update(filters or {})
+        response = requests.get(
+            f"{config.rest_url}/{table_name}",
+            headers=api_headers(config),
+            params=params,
+            timeout=config.timeout_seconds,
+        )
+        raise_for_response(response)
+        payload = response.json()
+        if not isinstance(payload, list):
+            return rows
+        rows.extend(item for item in payload if isinstance(item, dict))
+        if len(payload) < PAGE_SIZE:
+            return rows
+        offset += PAGE_SIZE
+
+
+def fetch_rh_tables(config: DataConfig, new_issue_only: bool = False) -> dict[str, Any]:
+    tables: dict[str, Any] = {}
+    errors: dict[str, str] = {}
+    asset_scope = "all_active" if new_issue_only else "latest20"
+    dashboard_select = "token,pool_address,pool,tvl_usd,volume_24h_usd,fee_apr,current_apr,apr_2h,rank_2h,rank_24h,is_new_issue,new_issue_discovered_at,metric_time,sync_time,swap_count_2h,swap_count_24h,fee_income_2h_usd,fee_income_24h_usd,yield_2h_percent,yield_24h_percent,data_quality_2h,data_quality_24h,chain_id,asset_scope"
+    rankings_select = "pool_id,pool_address,window_hours,pool_pair,token0_symbol,token1_symbol,rwa_symbols,fee_income_usd,pool_size_usd_proxy,annualized_yield_percent,window_yield_percent,window_start,window_end,data_quality,computed_at,chain_id,asset_scope,is_public"
+    dashboard_filters = {"chain_id": f"eq.{RH_CHAIN_ID}", "asset_scope": f"eq.{asset_scope}", "order": "rank_24h.asc.nullslast"}
+    if new_issue_only:
+        dashboard_filters["is_new_issue"] = "eq.true"
+    table_specs = (
+        (RH_DASHBOARD_VIEW, RH_DASHBOARD_VIEW, dashboard_select, dashboard_filters),
+        (RH_RANKINGS_TABLE, RH_RANKINGS_TABLE, rankings_select, {"chain_id": f"eq.{RH_CHAIN_ID}", "asset_scope": f"eq.{asset_scope}", "is_public": "eq.true", "window_hours": "eq.4", "order": "annualized_yield_percent.desc.nullslast"}),
+        (RH_TOKEN_UNIVERSE_KEY, RH_DASHBOARD_VIEW, "token", {"chain_id": f"eq.{RH_CHAIN_ID}", "asset_scope": "eq.all_active"}),
+    )
+    for table_key, table_name, select, filters in table_specs:
+        try:
+            tables[table_key] = fetch_table_rows(config, table_name, filters, select)
+        except (requests.RequestException, DataApiError, ValueError) as exc:
+            tables[table_key] = []
+            errors[table_key] = type(exc).__name__
+    tables[RH_TABLE_ERRORS_KEY] = errors
+    return tables
+
+
+def get_cached_rh_tables(config: DataConfig, refresh_seconds: int, new_issue_only: bool = False) -> dict[str, Any]:
+    cache_key = (config.url, config.api_key, RH_PUBLIC_TABLE_NAMES, new_issue_only)
+    cache = st.session_state.get("rh_tables_cache")
+    now_ts = time.time()
+    if (
+        isinstance(cache, dict)
+        and cache.get("key") == cache_key
+        and refresh_seconds > 0
+        and now_ts - float(cache.get("loaded_at", 0.0)) < refresh_seconds
+    ):
+        return cache["tables"]
+    tables = fetch_rh_tables(config, new_issue_only)
+    st.session_state["rh_tables_cache"] = {"key": cache_key, "tables": tables, "loaded_at": time.time()}
+    return tables
+
+
+def pool_address_from(row: dict[str, Any]) -> str:
+    return text_value(
+        row,
+        "pool_address",
+        "pool_addr",
+        "pool",
+        "address",
+        "amm_pool_address",
+        "pool_id",
+    )
+
+
+def pool_name_from(row: dict[str, Any], address: str) -> str:
+    pair = text_value(row, "pool", "pool_pair", "pool_name", "pair", "token_pair")
+    if pair:
+        return pair
+    token0 = text_value(row, "token0_symbol", "token0")
+    token1 = text_value(row, "token1_symbol", "token1")
+    if token0 and token1:
+        return f"{token0}/{token1}"
+    return address[:10] + "…"
+
+
+def is_rh_chain_row(row: dict[str, Any]) -> bool:
+    chain_value = first_value(row, "chain_id", "chain", "network", "chain_name")
+    if chain_value in (None, ""):
+        return True
+    return str(chain_value).strip().lower() in {RH_CHAIN_ID, "rh", "rhodium"}
+
+
+def asset_lookup_from(rows: list[dict[str, Any]]) -> dict[str, tuple[str, str]]:
+    lookup: dict[str, tuple[str, str]] = {}
+    for row in rows:
+        token = text_value(row, "token_symbol", "symbol", "asset_symbol", "ticker", "token")
+        token_name = text_value(row, "token_name", "asset_name", "name", default=token)
+        identifiers = (
+            text_value(row, "id", "asset_id", "rwa_asset_id", "token_id"),
+            text_value(row, "address", "token_address", "contract_address"),
+            token,
+        )
+        if not token:
+            continue
+        for identifier in identifiers:
+            if identifier:
+                lookup[identifier.lower()] = (token, token_name)
+    return lookup
+
+
+def token_from(row: dict[str, Any], assets: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    direct_token = text_value(
+        row,
+        "rwa_symbols",
+        "rwa_symbol",
+        "token_symbol",
+        "token0_symbol",
+        "symbol",
+        "asset_symbol",
+        "ticker",
+        "token",
+        "canonical_symbol",
+    )
+    direct_name = text_value(row, "token_name", "asset_name", "name", default=direct_token)
+    if direct_token:
+        return direct_token, direct_name
+    asset_ref = text_value(row, "asset_id", "rwa_asset_id", "token_id", "asset_address", "token_address")
+    return assets.get(asset_ref.lower(), ("未标注", "未标注"))
+
+
+def metric_value(row: dict[str, Any], metric: str, window: str | None = None) -> Decimal | None:
+    keys: list[str] = []
+    if window:
+        hours = window.removesuffix("h")
+        keys.extend(
+            [
+                f"{metric}_{window}",
+                f"{metric}_{hours}h",
+                f"{window}_{metric}",
+                f"{hours}h_{metric}",
+                f"window_{window}_{metric}",
+                f"window_{hours}h_{metric}",
+            ]
+        )
+    keys.extend(
+        {
+            "tvl": ("tvl_usd", "tvl", "liquidity_usd", "pool_tvl_usd", "pool_size_usd_proxy", "total_value_locked"),
+            "fee_income": ("fee_income_usd",),
+            "apr": ("annualized_yield_percent", "window_yield_percent", "fee_apr_percent", "fee_apr", "apr_percent", "apr", "apy_percent", "apy", "yield_percent"),
+        }.get(metric, (metric,))
+    )
+    value = first_value(row, *keys)
+    return None if value in (None, "") else to_decimal(value)
+
+
+def rank_value(row: dict[str, Any], window: str) -> int | None:
+    value = first_value(row, "rank", "pool_rank", "ranking", f"rank_{window}", f"rank_{window.removesuffix('h')}h")
+    if value in (None, ""):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def build_rh_pool_rows(tables: dict[str, Any]) -> list[RhPoolRow]:
+    assets = asset_lookup_from(tables.get("rh_rwa_assets", []))
+    records: dict[str, dict[str, Any]] = {}
+
+    def record_for(row: dict[str, Any]) -> dict[str, Any] | None:
+        address = pool_address_from(row)
+        if not address:
+            return None
+        key = address.lower()
+        token, token_name = token_from(row, assets)
+        record = records.setdefault(
+            key,
+            {
+                "pool_address": address,
+                "token": token,
+                "token_name": token_name,
+                "pool_name": pool_name_from(row, address),
+                "tvl_usd": None,
+                "volume_24h_usd": None,
+                "is_new_issue": False,
+                "window_fee_income": {window: None for window in RH_WINDOW_OPTIONS},
+                "fee_apr_percent": None,
+                "windows": {window: None for window in RH_WINDOW_OPTIONS},
+                "ranks": {window: None for window in RH_WINDOW_OPTIONS},
+                "last_metric_time": None,
+                "synced_at_iso": "",
+            },
+        )
+        if token != "未标注":
+            record["token"], record["token_name"] = token, token_name
+        if record["pool_name"] == address[:10] + "…":
+            record["pool_name"] = pool_name_from(row, address)
+        return record
+
+    for row in tables.get(RH_DASHBOARD_VIEW, []):
+        if not is_rh_chain_row(row):
+            continue
+        record = record_for(row)
+        if record is None:
+            continue
+        tvl = metric_value(row, "tvl")
+        if tvl is not None and record["tvl_usd"] is None:
+            record["tvl_usd"] = tvl
+        volume = to_optional_decimal(first_value(row, "volume_24h_usd"))
+        if volume is not None:
+            record["volume_24h_usd"] = volume
+        current_apr = to_optional_decimal(first_value(row, "current_apr", "fee_apr"))
+        fee_apr = to_optional_decimal(first_value(row, "fee_apr"))
+        if current_apr is not None:
+            record["fee_apr_percent"] = current_apr
+        elif fee_apr is not None:
+            record["fee_apr_percent"] = fee_apr
+        record["windows"]["2h"] = to_optional_decimal(first_value(row, "apr_2h", "current_apr"))
+        record["windows"]["24h"] = fee_apr
+        record["window_fee_income"]["2h"] = to_optional_decimal(first_value(row, "fee_income_2h_usd"))
+        record["window_fee_income"]["24h"] = to_optional_decimal(first_value(row, "fee_income_24h_usd"))
+        record["ranks"]["2h"] = rank_value(row, "2h")
+        record["ranks"]["24h"] = rank_value(row, "24h")
+        record["is_new_issue"] = to_bool(first_value(row, "is_new_issue"))
+        metric_time = parse_timestamp(first_value(row, "metric_time", "computed_at"))
+        if metric_time is not None:
+            record["last_metric_time"] = metric_time
+        sync_time = parse_timestamp(first_value(row, "sync_time"))
+        if sync_time is not None:
+            record["synced_at_iso"] = sync_time.isoformat()
+
+    for row in tables.get("rh_pool_hourly_metrics", []):
+        if not is_rh_chain_row(row):
+            continue
+        record = record_for(row)
+        if record is None:
+            continue
+        tvl = metric_value(row, "tvl")
+        fee_income = metric_value(row, "fee_income")
+        apr = metric_value(row, "apr")
+        if tvl is not None and record["tvl_usd"] is None:
+            record["tvl_usd"] = tvl
+        if fee_income is not None:
+            record["window_fee_income"]["24h"] = fee_income
+        if apr is not None:
+            record["fee_apr_percent"] = apr
+        metric_time = parse_timestamp(first_value(row, "metric_time", "bucket_start", "timestamp", "hour", "hour_start", "recorded_at", "created_at"))
+        if metric_time is not None and (record["last_metric_time"] is None or metric_time > record["last_metric_time"]):
+            record["last_metric_time"] = metric_time
+        for window in RH_WINDOW_OPTIONS:
+            window_metric = metric_value(row, "apr", window)
+            if window_metric is not None:
+                record["windows"][window] = window_metric
+
+    dashboard_view_present = RH_DASHBOARD_VIEW in tables
+    dashboard_pool_addresses = {
+        pool_address_from(row).lower()
+        for row in tables.get(RH_DASHBOARD_VIEW, [])
+        if pool_address_from(row)
+    }
+    for row in tables.get("rh_pool_window_rankings", []):
+        if not is_rh_chain_row(row):
+            continue
+        if dashboard_view_present and pool_address_from(row).lower() not in dashboard_pool_addresses:
+            continue
+        record = record_for(row)
+        if record is None:
+            continue
+        window = normalize_window(first_value(row, "window_hours", "window", "hours", "period", "time_window"))
+        if window is None:
+            for candidate in RH_WINDOW_OPTIONS:
+                candidate_metric = metric_value(row, "apr", candidate)
+                if candidate_metric is not None:
+                    record["windows"][candidate] = candidate_metric
+                candidate_rank = rank_value(row, candidate)
+                if candidate_rank is not None:
+                    record["ranks"][candidate] = candidate_rank
+        else:
+            window_metric = metric_value(row, "apr") or metric_value(row, "apr", window)
+            if window_metric is not None:
+                record["windows"][window] = window_metric
+            window_fee_income = metric_value(row, "fee_income")
+            if window_fee_income is not None:
+                record["window_fee_income"][window] = window_fee_income
+            record["ranks"][window] = rank_value(row, window) or rank_value(row, "24h")
+            ranking_time = parse_timestamp(first_value(row, "computed_at"))
+            if ranking_time is not None and record["last_metric_time"] is None:
+                record["last_metric_time"] = ranking_time
+
+    checkpoint_rows = tables.get("rh_sync_checkpoints", [])
+    checkpoint_times = [
+        parse_timestamp(first_value(row, "synced_at", "last_synced_at", "checkpoint_time", "updated_at", "created_at"))
+        for row in checkpoint_rows
+    ]
+    checkpoint_times = [value for value in checkpoint_times if value is not None]
+    synced_at_iso = max(checkpoint_times).isoformat() if checkpoint_times else ""
+    if synced_at_iso:
+        for record in records.values():
+            record["synced_at_iso"] = synced_at_iso
+
+    result = [
+        RhPoolRow(
+            pool_address=record["pool_address"],
+            token=record["token"],
+            token_name=record["token_name"],
+            pool_name=record["pool_name"],
+            tvl_usd=record["tvl_usd"],
+            volume_24h_usd=record["volume_24h_usd"],
+            is_new_issue=record["is_new_issue"],
+            fee_income_2h_usd=record["window_fee_income"]["2h"],
+            fee_income_4h_usd=record["window_fee_income"]["4h"],
+            fee_income_24h_usd=record["window_fee_income"]["24h"],
+            fee_apr_percent=record["fee_apr_percent"],
+            window_2h_percent=record["windows"]["2h"],
+            window_4h_percent=record["windows"]["4h"],
+            window_24h_percent=record["windows"]["24h"],
+            rank_2h=record["ranks"]["2h"],
+            rank_4h=record["ranks"]["4h"],
+            rank_24h=record["ranks"]["24h"],
+            last_metric_time_iso=record["last_metric_time"].isoformat() if record["last_metric_time"] is not None else "",
+            synced_at_iso=record["synced_at_iso"],
+        )
+        for record in records.values()
+    ]
+    for window in RH_WINDOW_OPTIONS:
+        ranked = sorted(
+            (row for row in result if getattr(row, f"window_{window}_percent") is not None),
+            key=lambda row: getattr(row, f"window_{window}_percent"),
+            reverse=True,
+        )
+        computed_ranks = {row.pool_address.lower(): index for index, row in enumerate(ranked, 1)}
+        result = [
+            row if getattr(row, f"rank_{window}") is not None else RhPoolRow(
+                pool_address=row.pool_address,
+                token=row.token,
+                token_name=row.token_name,
+                pool_name=row.pool_name,
+                tvl_usd=row.tvl_usd,
+                volume_24h_usd=row.volume_24h_usd,
+                is_new_issue=row.is_new_issue,
+                fee_income_2h_usd=row.fee_income_2h_usd,
+                fee_income_4h_usd=row.fee_income_4h_usd,
+                fee_income_24h_usd=row.fee_income_24h_usd,
+                fee_apr_percent=row.fee_apr_percent,
+                window_2h_percent=row.window_2h_percent,
+                window_4h_percent=row.window_4h_percent,
+                window_24h_percent=row.window_24h_percent,
+                rank_2h=computed_ranks.get(row.pool_address.lower()) if window == "2h" else row.rank_2h,
+                rank_4h=computed_ranks.get(row.pool_address.lower()) if window == "4h" else row.rank_4h,
+                rank_24h=computed_ranks.get(row.pool_address.lower()) if window == "24h" else row.rank_24h,
+                last_metric_time_iso=row.last_metric_time_iso,
+                synced_at_iso=row.synced_at_iso,
+            )
+            for row in result
+        ]
+    return sorted(result, key=lambda item: (item.token, item.pool_address))
+
+
+def demo_rh_pool_rows() -> list[RhPoolRow]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    samples = [
+        ("USYC", "USYC / USDC", "0x7a2f…91c4", 18_420_000, 3_680_000, 8.42, 5.18, 7.36, 8.42),
+        ("OUSG", "OUSG / USDC", "0x2d8b…f0a1", 11_760_000, 2_140_000, 6.85, 4.12, 5.64, 6.85),
+        ("USDY", "USDY / USDC", "0xb910…2e77", 8_960_000, 1_760_000, 7.63, 5.74, 6.92, 7.63),
+        ("TBILL", "TBILL / USDC", "0x4c61…d8aa", 6_310_000, 920_000, 5.92, 3.88, 5.21, 5.92),
+        ("mTBILL", "mTBILL / USDC", "0xa83e…c512", 4_280_000, 610_000, 4.76, 3.42, 4.18, 4.76),
+        ("BUIDL", "BUIDL / USDC", "0xf12a…74be", 3_740_000, 480_000, 4.31, 2.97, 3.82, 4.31),
+    ]
+    return [
+        RhPoolRow(
+            pool_address=address,
+            token=token,
+            token_name=token,
+            pool_name=pool_name,
+            tvl_usd=Decimal(str(tvl)),
+            volume_24h_usd=Decimal(str(volume)),
+            is_new_issue=index in {1, 3},
+            fee_income_2h_usd=Decimal(str(volume)),
+            fee_income_4h_usd=Decimal(str(volume)),
+            fee_income_24h_usd=Decimal(str(volume)),
+            fee_apr_percent=Decimal(str(fee_apr)),
+            window_2h_percent=Decimal(str(apr_2h)),
+            window_4h_percent=Decimal(str(apr_4h)),
+            window_24h_percent=Decimal(str(apr_24h)),
+            rank_2h=index,
+            rank_4h=index,
+            rank_24h=index,
+            last_metric_time_iso=now_iso,
+            synced_at_iso=now_iso,
+        )
+        for index, (token, pool_name, address, tvl, volume, fee_apr, apr_2h, apr_4h, apr_24h) in enumerate(samples, 1)
+    ]
 
 
 def get_apr_value(row: DashboardFundingRow, apr_field: str) -> Decimal:
@@ -693,6 +1178,148 @@ def render_apr_comparison(rows: list[DashboardFundingRow], selected_symbols: lis
             render_comparison_table(build_apr_comparison_rows(rows, apr_field), label)
 
 
+def as_rh_table_rows(rows: list[RhPoolRow], selected_window: str) -> list[dict[str, object]]:
+    window_field = f"window_{selected_window}_percent"
+    rank_field = f"rank_{selected_window}"
+    fee_income_field = f"fee_income_{selected_window}_usd"
+    return [
+        {
+            "token": row.token,
+            "token_name": row.token_name,
+            "pool_name": row.pool_name,
+            "pool_address": row.pool_address,
+            "tvl_usd": float(row.tvl_usd) if row.tvl_usd is not None else None,
+            "volume_24h_usd": float(row.volume_24h_usd) if row.volume_24h_usd is not None else None,
+            "is_new_issue": row.is_new_issue,
+            "fee_income_usd": float(getattr(row, fee_income_field)) if getattr(row, fee_income_field) is not None else None,
+            "fee_apr_percent": float(row.fee_apr_percent) if row.fee_apr_percent is not None else None,
+            "window_apr_percent": float(getattr(row, window_field)) if getattr(row, window_field) is not None else None,
+            "rank": getattr(row, rank_field),
+            "last_metric_time_utc": row.last_metric_time_iso,
+            "synced_at_utc": row.synced_at_iso,
+        }
+        for row in rows
+    ]
+
+
+def render_rh_pool_table(frame: pd.DataFrame, selected_window: str) -> None:
+    with st.container(border=True):
+        st.markdown("#### :material/table_chart: Pool surface")
+        st.caption(f"当前按 {RH_WINDOW_LABELS[selected_window]}年化收益率排序；空值表示源表没有足够数据计算该窗口收益率。")
+        st.dataframe(
+            frame,
+            width="stretch",
+            hide_index=True,
+            column_order=["token", "pool_name", "pool_address", "is_new_issue", "tvl_usd", "volume_24h_usd", "fee_income_usd", "fee_apr_percent", "window_apr_percent", "rank", "last_metric_time_utc", "synced_at_utc"],
+            column_config={
+                "token": st.column_config.TextColumn("代币", pinned=True),
+                "pool_name": st.column_config.TextColumn("Pool"),
+                "pool_address": st.column_config.TextColumn("Pool address", pinned=True),
+                "is_new_issue": st.column_config.CheckboxColumn("新股票"),
+                "tvl_usd": st.column_config.NumberColumn("Pool size proxy (USD)", format="$%,.0f"),
+                "volume_24h_usd": st.column_config.NumberColumn("24h Swap volume (USD)", format="$%,.0f"),
+                "fee_income_usd": st.column_config.NumberColumn("窗口手续费收入 (USD)", format="$%,.0f"),
+                "fee_apr_percent": st.column_config.NumberColumn("当前年化收益率", format="%.2f%%"),
+                "window_apr_percent": st.column_config.NumberColumn(f"{selected_window} 年化收益率", format="%.2f%%"),
+                "rank": st.column_config.NumberColumn(f"{selected_window} rank", format="%d"),
+                "last_metric_time_utc": st.column_config.TextColumn("Metric time (UTC)"),
+                "synced_at_utc": st.column_config.TextColumn("Sync time (UTC)"),
+            },
+        )
+
+
+def render_rh_pools_page() -> tuple[list[str], list[str]]:
+    render_hero("RH Pools", "RH 链 RWA 池子查询原型：基于公开窗口排名表，按交易对、收益窗口和 pool address 快速定位池子。")
+    window_query = str(st.query_params.get(RH_WINDOW_QUERY_KEY, "2h"))
+    if window_query not in RH_WINDOW_OPTIONS:
+        window_query = "2h"
+    if RH_WINDOW_KEY not in st.session_state:
+        st.session_state[RH_WINDOW_KEY] = RH_WINDOW_LABELS[window_query]
+    if RH_NEW_ISSUE_KEY not in st.session_state:
+        st.session_state[RH_NEW_ISSUE_KEY] = str(st.query_params.get("rh_new_issue", "false")).lower() == "true"
+    new_issue_only = bool(st.session_state[RH_NEW_ISSUE_KEY])
+    config = load_config()
+    tables: dict[str, Any] = {}
+    source_is_demo = config is None
+    if source_is_demo:
+        rows = demo_rh_pool_rows()
+        st.caption("当前为演示数据：配置 Supabase 后将自动读取公开的 RH 窗口排名表。")
+    else:
+        try:
+            tables = get_cached_rh_tables(config, DEFAULT_REFRESH_SECONDS, new_issue_only)
+            table_errors = tables.get(RH_TABLE_ERRORS_KEY, {})
+            if table_errors:
+                st.caption("部分表当前不可读：" + ", ".join(sorted(table_errors)) + "；已使用可读表继续渲染原型。")
+            rows = build_rh_pool_rows(tables)
+            if not rows:
+                if new_issue_only and not table_errors:
+                    tables = get_cached_rh_tables(config, DEFAULT_REFRESH_SECONDS, False)
+                    rows = build_rh_pool_rows(tables)
+                if not rows:
+                    st.warning("公开 RH 窗口排名表已连接，但没有解析出带 pool address 的记录；当前展示演示数据以便继续评审原型。")
+                    rows = demo_rh_pool_rows()
+                    source_is_demo = True
+        except (requests.RequestException, DataApiError, ValueError) as exc:
+            st.warning(f"RH 公开窗口排名表读取失败，当前展示演示数据。错误类型: {type(exc).__name__}")
+            rows = demo_rh_pool_rows()
+            source_is_demo = True
+
+    row_table = pd.DataFrame(as_rh_table_rows(rows, "24h"))
+    token_options = sorted(
+        {
+            text_value(row, "token")
+            for row in tables.get(RH_TOKEN_UNIVERSE_KEY, [])
+            if text_value(row, "token")
+        }
+    )
+    if not token_options:
+        token_options = sorted(row_table["token"].dropna().unique().tolist())
+    address_options = sorted(row_table["pool_address"].dropna().unique().tolist())
+    with st.container(border=True):
+        st.markdown("#### :material/filter_alt: Pool filters")
+        window_labels = list(RH_WINDOW_LABELS.values())
+        selected_window_label = st.segmented_control("统计窗口", options=window_labels, key=RH_WINDOW_KEY)
+        selected_window = next((window for window, label in RH_WINDOW_LABELS.items() if label == selected_window_label), "2h")
+        prepare_multiselect_state(RH_TOKEN_KEY, "rh_tokens", token_options)
+        prepare_multiselect_state(RH_ADDRESS_KEY, "rh_addresses", address_options)
+        col_token, col_address, col_new_issue = st.columns([1, 1, 0.7], gap="medium")
+        with col_token:
+            selected_tokens = st.multiselect("代币（多选）", options=token_options, placeholder="全部代币", key=RH_TOKEN_KEY)
+        with col_address:
+            selected_addresses = st.multiselect("Pool address（多选）", options=address_options, placeholder="全部池子", key=RH_ADDRESS_KEY)
+        with col_new_issue:
+            selected_new_issue = st.checkbox("新股票", key=RH_NEW_ISSUE_KEY, help="仅显示池内存在 24 小时内新发行标记的股票池。")
+        scope_label = "all_active + is_new_issue=true" if selected_new_issue else "latest20"
+        st.caption(f"数据源：{'演示数据' if source_is_demo else f'Supabase / rh_pool_dashboard + 4h rankings（{scope_label}）'} · 支持通过 URL 参数保存筛选结果。")
+        st.query_params[RH_WINDOW_QUERY_KEY] = selected_window
+        st.query_params["rh_new_issue"] = "true" if selected_new_issue else "false"
+
+    display_frame = pd.DataFrame(as_rh_table_rows(rows, selected_window))
+    if selected_tokens:
+        display_frame = display_frame[display_frame["token"].isin(set(selected_tokens))]
+    if selected_addresses:
+        display_frame = display_frame[display_frame["pool_address"].isin(set(selected_addresses))]
+    if selected_new_issue:
+        display_frame = display_frame[display_frame["is_new_issue"]]
+    display_frame = display_frame.sort_values(by=["window_apr_percent", "tvl_usd"], ascending=[False, False], na_position="last").reset_index(drop=True)
+    if selected_new_issue:
+        st.caption(f"新股票池命中：{len(display_frame):,} / {len(rows):,}")
+    if display_frame.empty:
+        message = "当前数据库没有 `is_new_issue=true` 的池子。" if selected_new_issue else "当前筛选条件下没有池子。请减少代币或 pool address 的选择。"
+        st.warning(message)
+        return selected_tokens, selected_addresses
+
+    render_rh_pool_table(display_frame, selected_window)
+    with st.expander("原型说明 / 四表职责", icon=":material/info:"):
+        st.markdown(
+            "- `rh_pool_dashboard`：前端主查询视图，提供池名、24h 成交量、Pool size proxy、2h/24h 年化收益率、排名和同步时间。\n"
+            "- `rh_pool_window_rankings`：仅补充视图没有的 4h 年化收益率、手续费和排名。\n"
+            "- `rh_pool_hourly_metrics`、`rh_rwa_assets`、`rh_sync_checkpoints`：文档标记为 Worker service role 专用，前端不直接读取。\n\n"
+            "查询固定使用 `chain_id=4663`；未勾选使用 `asset_scope=latest20`，勾选新股票使用 `asset_scope=all_active` + `is_new_issue=true`；ranking 补充查询额外使用 `is_public=true`，并按 `annualized_yield_percent desc nulls last` 排序。池子名称使用视图的 `pool`（如 `GLXY/USDG`）。"
+        )
+    return selected_tokens, selected_addresses
+
+
 def render_missing_config() -> None:
     st.error("缺少后台数据读取配置。请在 Streamlit Secrets 中配置 SUPABASE_URL 和 SUPABASE_PUBLISHABLE_KEY。")
 
@@ -778,9 +1405,34 @@ def main() -> None:
     st.set_page_config(page_title="美股资金费套利", page_icon=":material/query_stats:", layout="wide")
     inject_style()
     needs_symbol_options_refresh = False
-    home_tab, compare_tab = st.tabs([":material/dashboard: 首页", ":material/compare_arrows: APR比较"])
+    rh_selected_tokens: list[str] = []
+    rh_selected_addresses: list[str] = []
+    top_tab_key = str(st.query_params.get("tab", "home"))
+    if top_tab_key not in TOP_TAB_OPTIONS:
+        top_tab_key = "home"
+    if TOP_TAB_STATE_KEY not in st.session_state:
+        st.session_state[TOP_TAB_STATE_KEY] = TOP_TAB_OPTIONS[top_tab_key]
+    selected_top_tab = st.segmented_control(
+        "页面",
+        options=list(TOP_TAB_OPTIONS.values()),
+        key=TOP_TAB_STATE_KEY,
+        label_visibility="collapsed",
+    )
+    selected_top_tab_key = next(
+        (key for key, label in TOP_TAB_OPTIONS.items() if label == selected_top_tab),
+        top_tab_key,
+    )
+    if str(st.query_params.get("tab", "")) != selected_top_tab_key:
+        st.query_params["tab"] = selected_top_tab_key
 
-    with home_tab:
+    exchanges: list[str] = []
+    asset_type_filters: list[str] = []
+    compare_exchanges: list[str] = []
+    compare_asset_type_filters: list[str] = []
+    compare_selected_symbols: list[str] = []
+    compare_symbol_options: list[str] = []
+
+    if selected_top_tab_key == "home":
         render_hero("美股资金费套利", "深色实时资金费仪表盘，融合 latest / next / rolling APR、OI 与 24h 成交量，快速发现跨交易所错位。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
@@ -802,8 +1454,15 @@ def main() -> None:
                 render_dashboard_rows(rows, exchanges, loaded_at)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
+        set_query_param_selection("exchanges", exchanges)
+        set_query_param_selection("asset_types", asset_type_filters)
 
-    with compare_tab:
+    elif selected_top_tab_key == "rh_pools":
+        rh_selected_tokens, rh_selected_addresses = render_rh_pools_page()
+        set_query_param_selection("rh_tokens", rh_selected_tokens)
+        set_query_param_selection("rh_addresses", rh_selected_addresses)
+
+    else:
         render_hero("APR spread lab", "按统一 Symbol 对齐同标的，分别比较多交易所 24h / 7d / 15d / 30d APR 差异。")
         with st.container(border=True):
             st.markdown("#### :material/tune: Controls")
@@ -830,14 +1489,12 @@ def main() -> None:
                 render_apr_comparison(compare_rows, compare_selected_symbols)
             except (requests.RequestException, DataApiError, ValueError) as exc:
                 st.error(f"后台数据读取失败，请稍后重试。错误类型: {type(exc).__name__}")
+        set_query_param_selection("compare_exchanges", compare_exchanges)
+        set_query_param_selection("compare_asset_types", compare_asset_type_filters)
+        set_query_param_selection("compare_symbols", compare_selected_symbols if compare_symbol_options else None)
 
     if needs_symbol_options_refresh:
         st.rerun()
-    set_query_param_selection("exchanges", exchanges)
-    set_query_param_selection("asset_types", asset_type_filters)
-    set_query_param_selection("compare_exchanges", compare_exchanges)
-    set_query_param_selection("compare_asset_types", compare_asset_type_filters)
-    set_query_param_selection("compare_symbols", compare_selected_symbols if compare_symbol_options else None)
 
 
 if __name__ == "__main__":
